@@ -26,19 +26,20 @@ def _(txt):
     from collections import Counter
     vocab_sz = 3000
     stop_words = ["i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves", "what", "which", "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an", "the", "and", "but", "if", "or", "because", "as", "until", "while", "of", "at", "by", "for", "with", "about", "against", "between", "into", "through", "during", "before", "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can", "will", "just", "don", "should", "now"]
-    # stop_words = []
+
     lst = [word for word in txt.split() if word != '']
-    vocab = [word for word, cnt in Counter(lst).most_common(vocab_sz) if word not in stop_words]
+    filtered = [word for word in lst if word not in stop_words]
+    vocab = [word for word, cnt in Counter(filtered).most_common(vocab_sz) if word not in stop_words]
     vocab_sz = len(vocab)
 
     vocab_st = set(vocab)
     dict = {word: i for i, word in enumerate(vocab)}
-    data = [dict[word] for word in lst if word in vocab_st]
+    data = [dict[word] for word in filtered if word in vocab_st]
     print(data[:20])
     print(len(data))
     print(len(vocab))
     print(len(stop_words))
-    return data, dict, vocab, vocab_sz
+    return data, dict, vocab, vocab_st, vocab_sz
 
 
 @app.cell
@@ -46,6 +47,7 @@ def _(data):
     # training data, loop over the text to generate target and context
     import numpy as np
     import Neural as Neur
+    np.random.seed(1000)
     x = []
     y = []
     window = 3
@@ -59,14 +61,25 @@ def _(data):
         x.append(context)
         y.append(data[i])
 
-    Y_train = np.array(y)
-    X_train = np.array(x)
+
+    x = np.array(x)
+    y = np.array(y)
+    indices = np.arange(len(x))
+    np.random.shuffle(indices)
+    x_shuffled = x[indices]
+    y_shuffled = y[indices]
+    end = int(len(x_shuffled) * 0.9)
+
+    X_train = x_shuffled[:end]
+    Y_train = y_shuffled[:end]
+    X_test = x_shuffled[end:]
+    Y_test = y_shuffled[end:]
     print(len(Y_train))
-    return Neur, X_train, Y_train, np, window
+    return Neur, X_test, X_train, Y_test, Y_train, np, window
 
 
 @app.cell
-def _(Neur, X_train, Y_train, np, vocab_sz, window):
+def _(Neur, Y_train, np, vocab_sz, window):
     # neural network!
     import importlib
     from tqdm import tqdm
@@ -86,13 +99,194 @@ def _(Neur, X_train, Y_train, np, vocab_sz, window):
         mat[np.arange(len(indices)), indices] = 1
         return mat
 
-    def build_net_sgd(dim, lr, epochs, decay, batch=128):
+    return get_cbow, get_one_hot, sz, tqdm
+
+
+@app.cell
+def _(Neur, X_train, Y_train, get_cbow, get_one_hot, np, sz, tqdm, vocab_sz):
+    import time
+    import copy
+
+    def step_sgd(N_a, state, g):
+        params = N_a.get_params()
+        N_a.set_params(params - state['lr'] * g)
+        return state
+
+    def step_red(N_a, state, g, lv, X):
+        beta3, ell, eps = 0.9, 1.0, 1e-4
+
+        d = g
+        nrm2 = np.dot(d, d)
+        p = N_a.get_params()
+
+        N_a.set_params(p + eps * d)
+        lp = N_a.forward(X.T)
+        N_a.set_params(p - eps * d)
+        lm = N_a.forward(X.T)
+        N_a.set_params(p)
+
+        ck = max(abs((lp + lm - 2 * lv) / (eps ** 2)) / nrm2, 1e-20)
+        state['chat'] = beta3 * state['chat'] + (1 - beta3) * ck
+        ctilde = state['chat'] / (1 - beta3 ** (state['k'] + 1))
+        Lk = max(ctilde, ck)
+        rk = np.dot(d, g) / (2 * nrm2 * Lk)
+
+        N_a.set_params(p - ell * rk * d)
+        state['k'] += 1
+        return state
+
+    def step_adam(N_a, state, g):
+        b1, b2, e = 0.9, 0.999, 1e-8
+
+        state['m'] = b1 * state['m'] + (1 - b1) * g
+        state['v'] = b2 * state['v'] + (1 - b2) * g**2
+        mh = state['m'] / (1 - b1 ** (state['k'] + 1))
+        vh = state['v'] / (1 - b2 ** (state['k'] + 1))
+
+        p = N_a.get_params()
+        p -= state['lr'] * mh / (np.sqrt(vh) + e)
+        N_a.set_params(p)
+        state['k'] += 1
+        return state
+
+    def step_adahessian(N_a, state, g, loss_layer, X, Y):
+        b1, b2, e, eps = 0.9, 0.999, 1e-4, 1e-4
+        p = N_a.get_params()
+        z = np.random.choice([-1.0, 1.0], size=len(p))
+        N_a.set_params(p + eps * z)
+        loss_layer.save_D = Y.T
+        N_a.forward(X.T)
+        gp, _ = N_a.backward(None)
+
+        N_a.set_params(p)
+        D = z * (gp - g) / eps
+        D = np.clip(D, -2.0, 2.0)
+
+        state['m'] = b1 * state['m'] + (1 - b1) * g
+        state['v'] = b2 * state['v'] + (1 - b2) * (D**2)
+        mh = state['m'] / (1 - b1 ** (state['k'] + 1))
+        vh = state['v'] / (1 - b2 ** (state['k'] + 1))
+
+        p -= state['lr'] * mh / (np.sqrt(vh) + e)
+        N_a.set_params(p)
+        state['k'] += 1
+        return state
+
+    def step_redm(N_a, state, g, lv, X):
+        beta3, b1, ell, eps = 0.9, 0.9, 1.0, 1e-4
+        state['m'] = b1 * state['m'] + (1 - b1) * g
+        mh = state['m'] / (1 - b1 ** (state['k'] + 1))
+        d = mh
+        nrm2 = np.dot(d, d)
+        p = N_a.get_params()
+
+        N_a.set_params(p + eps * d)
+        lp = N_a.forward(X.T)
+        N_a.set_params(p - eps * d)
+        lm = N_a.forward(X.T)
+        N_a.set_params(p)
+
+        ck = max(abs((lp + lm - 2 * lv) / (eps ** 2)) / nrm2, 1e-20)
+        state['chat'] = beta3 * state['chat'] + (1 - beta3) * ck
+        ctilde = state['chat'] / (1 - beta3 ** (state['k'] + 1))
+        Lk = max(ctilde, ck)
+        rk = 1 / (2 * Lk)
+
+        p -= ell * rk * d
+        N_a.set_params(p)
+        state['k'] += 1
+        return state
+
+    def step_spadam(N_a, state, g):
+        b1, b2, e = 0.9, 0.999, 1e-8
+
+        active = np.where(g != 0.0)[0]
+        state['m'][active] = b1 * state['m'][active] + (1 - b1) * g[active]
+        state['v'][active] = b2 * state['v'][active] + (1 - b2) * g[active]**2
+        mh = state['m'][active] / (1 - b1 ** (state['k'] + 1))
+        vh = state['v'][active] / (1 - b2 ** (state['k'] + 1))
+
+        p = N_a.get_params()
+        p[active] -= state['lr'] * mh / (np.sqrt(vh) + e)
+        N_a.set_params(p)
+        state['k'] += 1
+        return state
+
+    def step_spadahessian(N_a, state, g, loss_layer, X, Y):
+        b1, b2, e, eps = 0.9, 0.999, 1e-4, 1e-4
+
+        active = np.where(g != 0.0)[0]
+        p = N_a.get_params()
+        z = np.zeros_like(p)
+        z[active] = np.random.choice([-1.0, 1.0], size=len(active))
+        N_a.set_params(p + eps * z)
+        loss_layer.save_D = Y.T
+        N_a.forward(X.T)
+        gp, _ = N_a.backward(None)
+
+        N_a.set_params(p)
+        D = z * (gp - g) / eps
+        D = np.clip(D, -2.0, 2.0)
+
+        state['m'][active] = b1 * state['m'][active] + (1 - b1) * g[active]
+        state['v'][active] = b2 * state['v'][active] + (1 - b2) * (D[active]**2)
+        mh = state['m'][active] / (1 - b1 ** (state['k'] + 1))
+        vh = state['v'][active] / (1 - b2 ** (state['k'] + 1))
+
+        p[active] -= state['lr'] * mh / (np.sqrt(vh) + e)
+        N_a.set_params(p)
+        state['k'] += 1
+        return state
+
+    def step_spredm(N_a, state, g, lv, X):
+        beta3, b1, ell, eps = 0.9, 0.9, 1.0, 1e-4
+
+        active = np.where(g != 0.0)[0]
+        state['m'][active] = b1 * state['m'][active] + (1 - b1) * g[active]
+        mh = state['m'][active] / (1 - b1 ** (state['k'] + 1))
+        d = np.zeros_like(g)
+        d[active] = mh
+        nrm2 = np.dot(d, d)
+        p = N_a.get_params()
+
+        N_a.set_params(p + eps * d)
+        lp = N_a.forward(X.T)
+        N_a.set_params(p - eps * d)
+        lm = N_a.forward(X.T)
+        N_a.set_params(p)
+
+        ck = max(abs((lp + lm - 2 * lv) / (eps ** 2)) / nrm2, 1e-20)
+        state['chat'] = beta3 * state['chat'] + (1 - beta3) * ck
+        ctilde = state['chat'] / (1 - beta3 ** (state['k'] + 1))
+        Lk = max(ctilde, ck)
+        rk = 1 / (2 * Lk)
+
+        p[active] -= ell * rk * d[active]
+        N_a.set_params(p)
+        state['k'] += 1
+        return state
+
+
+    def build_net(optimizer, dim, epochs, batch, lr=1.0, decay=1.0):
+        np.random.seed(1000)
         history = []
         history_00 = []
+        Nh = []
 
         N = Neur.Network([Neur.Dense(vocab_sz, dim), Neur.Dense(dim, vocab_sz)])
         loss_layer = Neur.Ilogit_and_KL(None)
         N_a = Neur.Network([N, loss_layer])
+
+        state = {'k': 0, 'lr': lr, 'decay': decay}
+        if optimizer in ['adahessian', 'adam', 'redm', 'spadahessian', 'spadam', 'spredm']:
+            state['m'] = np.zeros(N_a.nb_params)
+        if optimizer in ['adahessian', 'adam', 'spadahessian', 'spadam']:
+            state['v'] = np.zeros(N_a.nb_params)
+        if optimizer in ['red', 'redm', 'spredm']:
+            state['chat'] = 0.0
+
+        start_time = time.time()
+        times = []
 
         for epoch in range(epochs):
             total_loss = 0
@@ -105,6 +299,7 @@ def _(Neur, X_train, Y_train, np, vocab_sz, window):
                               unit="batch")
 
             batches = 0
+
             for i in batch_loop:
 
                 X_cur = get_cbow(X_shuffled[i:i+batch])
@@ -113,289 +308,149 @@ def _(Neur, X_train, Y_train, np, vocab_sz, window):
                 loss_layer.save_D = Y_cur.T
                 loss = N_a.forward(X_cur.T)
                 total_loss += loss
-                history.append(loss)
                 grads, in_grad = N_a.backward(None)
                 history_00.append(grads[0])
-                params = N_a.get_params()
-                new_params = params - (lr * grads)
 
-                N_a.set_params(new_params)
-
-                if i % 50 == 0:
-                    batch_loop.set_postfix({"loss": f"{loss:.2f}"})
+                if optimizer == 'sgd':
+                    state = step_sgd(N_a, state, grads)
+                if optimizer == 'red':
+                    state = step_red(N_a, state, grads, loss, X_cur)
+                if optimizer == 'redm':
+                    state = step_redm(N_a, state, grads, loss, X_cur)
+                if optimizer == 'adam':
+                    state = step_adam(N_a, state, grads)
+                if optimizer == 'adahessian':
+                    state = step_adahessian(N_a, state, grads, loss_layer, X_cur, Y_cur)
+                if optimizer == 'spredm':
+                    state = step_spredm(N_a, state, grads, loss, X_cur)
+                if optimizer == 'spadam':
+                    state = step_spadam(N_a, state, grads)
+                if optimizer == 'spadahessian':
+                    state = step_spadahessian(N_a, state, grads, loss_layer, X_cur, Y_cur)
 
                 batches += 1
 
-            avg_loss = total_loss / batches
-            # history.append(avg_loss)
-
-            lr *= decay
-
-        return N, history, history_00
-
-    return build_net_sgd, get_cbow, get_one_hot, sz, tqdm
-
-
-@app.cell
-def _(Neur, X_train, Y_train, get_cbow, get_one_hot, np, sz, tqdm, vocab_sz):
-    def build_net_red(dim, epochs, batch=128):
-        history = []
-        history_00 = []
-
-        N = Neur.Network([Neur.Dense(vocab_sz, dim), Neur.Dense(dim, vocab_sz)])
-        loss_layer = Neur.Ilogit_and_KL(None)
-        N_a = Neur.Network([N, loss_layer])
-
-        beta3, ell, eps = 0.9, 1.0, 1e-4
-        chat = 0.0
-        k = 0
-
-        for epoch in range(epochs):
-            total_loss = 0
-            indices = np.arange(sz)
-            np.random.shuffle(indices)
-            X_shuffled = X_train[indices]
-            Y_shuffled = Y_train[indices]
-
-            batch_loop = tqdm(range(0, len(X_shuffled), batch),
-                              desc=f"Epoch {epoch + 1}/{epochs}",
-                              unit="batch")
-            batches = 0
-
-            for i in batch_loop:
-
-                X_cur = get_cbow(X_shuffled[i:i+batch])
-                Y_cur = get_one_hot(Y_shuffled[i:i+batch])
-
-                loss_layer.save_D = Y_cur.T
-                lv = N_a.forward(X_cur.T)
-                total_loss += lv
-                history.append(lv)
-                g, in_grad = N_a.backward(None)
-                history_00.append(g[0])
-
-                d = g
-                nrm2 = np.dot(d, d)
-                p = N_a.get_params()
-
-                # probe loss at p +/- eps*d to get directional 2nd diff
-                N_a.set_params(p + eps * d)
-                lp = N_a.forward(X_cur.T)
-                N_a.set_params(p - eps * d)
-                lm = N_a.forward(X_cur.T)
-                N_a.set_params(p)
-
-                ck = max(abs((lp + lm - 2 * lv) / (eps ** 2)) / nrm2, 1e-20)
-                chat = beta3 * chat + (1 - beta3) * ck
-                ctilde = chat / (1 - beta3 ** (k + 1))
-                Lk = max(ctilde, ck)
-                rk = np.dot(d, g) / (2 * nrm2 * Lk)
-                N_a.set_params(p - ell * rk * d)
-
                 if i % 50 == 0:
-                    batch_loop.set_postfix({"loss": f"{lv:.2f}"})
-
-                k += 1
-                batches += 1
+                    batch_loop.set_postfix({"loss": f"{total_loss / batches:.2f}"})
 
             avg_loss = total_loss / batches
-            # history.append(avg_loss)
+            history.append(avg_loss)
 
-        return N, history, history_00
+            state['lr'] *= state['decay']
+            times.append(time.time() - start_time)
+            Nh.append(copy.deepcopy(N))
 
-    return (build_net_red,)
+        return Nh, history, history_00, times
+
+    return (build_net,)
 
 
 @app.cell
-def _(Neur, X_train, Y_train, get_cbow, get_one_hot, np, sz, tqdm, vocab_sz):
-    def build_net_adahessian(dim, lr, epochs, batch=128):
-        history = []
-        history_00 = []
-
-        N = Neur.Network([Neur.Dense(vocab_sz, dim), Neur.Dense(dim, vocab_sz)])
-        loss_layer = Neur.Ilogit_and_KL(None)
-        N_a = Neur.Network([N, loss_layer])
-        b1, b2, e, eps = 0.9, 0.999, 1e-4, 1e-4
-
-        m = np.zeros(N_a.nb_params)
-        v = np.zeros(N_a.nb_params)
-        k = 0
-
-        for epoch in range(epochs):
-            total_loss = 0
-            indices = np.arange(sz)
-            np.random.shuffle(indices)
-            X_shuffled = X_train[indices]
-            Y_shuffled = Y_train[indices]
-
-            batch_loop = tqdm(range(0, len(X_shuffled), batch),
-                              desc=f"Epoch {epoch + 1}/{epochs}",
-                              unit="batch")
-            batches = 0
-
-            for i in batch_loop:
-
-                X_cur = get_cbow(X_shuffled[i:i+batch])
-                Y_cur = get_one_hot(Y_shuffled[i:i+batch])
-
-                loss_layer.save_D = Y_cur.T
-                lv = N_a.forward(X_cur.T)
-                total_loss += lv
-                history.append(lv)
-                g, in_grad = N_a.backward(None)
-                history_00.append(g[0])
-
-                p = N_a.get_params()
-                z = np.random.choice([-1.0, 1.0], size=len(p))
-                N_a.set_params(p + eps * z)
-                loss_layer.save_D = Y_cur.T
-                N_a.forward(X_cur.T)
-                gp, _ = N_a.backward(None)
-
-                N_a.set_params(p)
-                D = z * (gp - g) / eps
-                D = np.clip(D, -2.0, 2.0)
-
-                m = b1 * m + (1 - b1) * g
-                v = b2 * v + (1 - b2) * (D**2)
-                mh = m / (1 - b1 ** (k + 1))
-                vh = v / (1 - b2 ** (k + 1))
-
-                N_a.set_params(N_a.get_params() - lr * mh / (np.sqrt(vh) + e))
-
-                if i % 50 == 0:
-                    batch_loop.set_postfix({"loss": f"{lv:.2f}"})
-
-                k += 1
-                batches += 1
-
-            avg_loss = total_loss / batches
-            # history.append(avg_loss)
-
-        return N, history, history_00
-
-    return (build_net_adahessian,)
-
-
-@app.cell
-def _(Neur, X_train, Y_train, get_cbow, get_one_hot, np, sz, tqdm, vocab_sz):
-    def build_net_adam(dim, lr, epochs, batch=128):
-        print(batch)
-        history = []
-        history_00 = []
-
-        N = Neur.Network([Neur.Dense(vocab_sz, dim), Neur.Dense(dim, vocab_sz)])
-        loss_layer = Neur.Ilogit_and_KL(None)
-        N_a = Neur.Network([N, loss_layer])
-        b1, b2, e = 0.9, 0.999, 1e-8
-
-        m = np.zeros_like(N_a.nb_params)
-        v = np.zeros_like(N_a.nb_params)
-        k = 0
-
-        for epoch in range(epochs):
-            total_loss = 0
-            indices = np.arange(sz)
-            np.random.shuffle(indices)
-            X_shuffled = X_train[indices]
-            Y_shuffled = Y_train[indices]
-
-            batch_loop = tqdm(range(0, len(X_shuffled), batch),
-                              desc=f"Epoch {epoch + 1}/{epochs}",
-                              unit="batch")
-            batches = 0
-
-            for i in batch_loop:
-
-                X_cur = get_cbow(X_shuffled[i:i+batch])
-                Y_cur = get_one_hot(Y_shuffled[i:i+batch])
-
-                loss_layer.save_D = Y_cur.T
-                lv = N_a.forward(X_cur.T)
-                total_loss += lv
-                history.append(lv)
-                g, in_grad = N_a.backward(None)
-                history_00.append(g[0])
-
-                m = b1 * m + (1 - b1) * g
-                v = b2 * v + (1 - b2) * g**2
-                mh = m / (1 - b1 ** (k + 1))
-                vh = v / (1 - b2 ** (k + 1))
-
-                N_a.set_params(N_a.get_params() - lr * mh / (np.sqrt(vh) + e))
-
-                if i % 50 == 0:
-                    batch_loop.set_postfix({"loss": f"{lv:.2f}"})
-
-                k += 1
-                batches += 1
-
-            avg_loss = total_loss / batches
-            # history.append(avg_loss)
-
-        return N, history, history_00
-
-    return (build_net_adam,)
-
-
-@app.cell
-def _(build_net_adahessian, build_net_adam, build_net_red, build_net_sgd):
-    # Run and plot
+def _(build_net):
     import matplotlib.pyplot as plt
     import itertools
-    import time
 
-    N_list = []
-    hist_list = []
-    hist2_list = []
-    time_list = []
+    networks = {}
+    loss_history = {}
+    grad_history = {}
+    runtime = {}
 
-    start_time = time.time()
-    N, history, history2 = build_net_adahessian(50, 0.01, 10, 64)
-    N_list.append(N)
-    hist_list.append(history)
-    hist2_list.append(history2)
-    time_list.append(time.time() - start_time)
-
-    start_time = time.time()
-    N, history, history2 = build_net_adam(50, 0.01, 10, 64)
-    N_list.append(N)
-    hist_list.append(history)
-    hist2_list.append(history2)
-    time_list.append(time.time() - start_time)
-
-    start_time = time.time()
-    N, history, history2 = build_net_red(50, 10, 64)
-    N_list.append(N)
-    hist_list.append(history)
-    hist2_list.append(history2)
-    time_list.append(time.time() - start_time)
-
-    start_time = time.time()
-    N, history, history2 = build_net_sgd(50, 1.0, 10, 1.0, 64)
-    N_list.append(N)
-    hist_list.append(history)
-    hist2_list.append(history2)
-    time_list.append(time.time() - start_time)
-    return N_list, hist2_list, hist_list, plt
+    optimizers = ['sgd', 'red', 'redm', 'adahessian', 'adam']
+    for optim in optimizers:
+        print(optim)
+        if (optim == 'sgd'):
+            networks[optim], loss_history[optim], grad_history[optim], runtime[optim] = build_net(optim, 100, 20, 256, 3.0, 1.0)
+        else:
+            networks[optim], loss_history[optim], grad_history[optim], runtime[optim] = build_net(optim, 100, 20, 256, 0.01)
+    return grad_history, loss_history, networks, optimizers, plt, runtime
 
 
 @app.cell
-def _(hist2_list, np, plt):
-    data_adahessian = hist2_list[0]
-    data_adam = hist2_list[1]
-    data_red = hist2_list[2]
-    data_sgd = hist2_list[3]
+def _(Neur, X_test, Y_test, get_cbow, get_one_hot, networks, optimizers):
+    batch = 256
 
-    x_adam = np.linspace(0, 10, len(data_adam))
-    x_adahessian = np.linspace(0, 10, len(data_adahessian))
-    x_red = np.linspace(0, 10, len(data_red))
-    x_sgd = np.linspace(0, 10, len(data_sgd))
+    for optim2 in optimizers:
+        N = networks[optim2][-1]
+        loss_layer = Neur.Ilogit_and_KL(None)
+        N_a = Neur.Network([N, loss_layer])
 
-    plt.plot(x_adam, data_adam, color='g', alpha=0.2, label='Adam')
-    plt.plot(x_adahessian, data_adahessian, color='k', alpha=0.2, label='AdaHessian')
-    plt.plot(x_red, data_red, color='r', alpha=0.2, label='RED')
-    plt.plot(x_sgd, data_sgd, color='b', alpha=0.2, label='SGD')
+        total_loss = 0
+        batches = 0
+
+        # 3. Blitz through the unseen X_test and Y_test arrays
+        for k in range(0, len(X_test), batch):
+            X_cur = get_cbow(X_test[k:k+batch])
+            Y_cur = get_one_hot(Y_test[k:k+batch])
+
+            loss_layer.save_D = Y_cur.T
+            loss = N_a.forward(X_cur.T)
+
+            total_loss += loss
+            batches += 1
+
+        avg = total_loss / batches
+        print(f"{optim2} Test Loss: {avg:.4f}")
+    return
+
+
+@app.cell
+def _(
+    Neur,
+    X_test,
+    Y_test,
+    get_cbow,
+    get_one_hot,
+    networks,
+    np,
+    optimizers,
+    plt,
+):
+    display = {"sgd": "SGD", "red": "RED", "redm": "RED-M", "adahessian": "AdaHessian", "adam": "Adam"}
+    def evaluate_and_plot_test_loss():
+        test_losses = {optim: [] for optim in optimizers}
+        batch_size = 256
+
+        for optim in optimizers:
+            for N in networks[optim]:
+                loss_layer = Neur.Ilogit_and_KL(None)
+                N_a = Neur.Network([N, loss_layer])
+                total_loss = 0
+                batches = 0
+                for k in range(0, len(X_test), batch_size):
+                    X_cur = get_cbow(X_test[k : k + batch_size])
+                    Y_cur = get_one_hot(Y_test[k : k + batch_size])
+
+                    loss_layer.save_D = Y_cur.T
+                    loss = N_a.forward(X_cur.T)
+
+                    total_loss += loss
+                    batches += 1
+
+                test_losses[optim].append(total_loss / batches)
+
+        for optim, losses in test_losses.items():
+            plt.plot(range(1, 21), losses, label=display[optim], marker="o", markersize=3)
+
+        plt.xlabel("Epochs")
+        plt.ylabel("Test Loss")
+        plt.title("Test Loss Across 20 Epochs")
+        plt.legend()
+        plt.xticks(np.arange(0, 21, 2))
+        plt.show()
+    
+    evaluate_and_plot_test_loss()
+    return (display,)
+
+
+@app.cell
+def _(grad_history, np, plt):
+    x_axis = np.linspace(0, 10, len(grad_history['sgd']))
+
+    plt.plot(x_axis, grad_history['redm'], alpha=0.1, label='RED-M')
+    plt.plot(x_axis, grad_history['adam'], alpha=0.1, label='Adam')
+    plt.plot(x_axis, grad_history['adahessian'],  alpha=0.1, label='AdaHessian')
+    plt.plot(x_axis, grad_history['red'], color='r', alpha=0.1, label='RED')
+    plt.plot(x_axis, grad_history['sgd'], color='b', alpha=0.1, label='SGD')
 
     plt.xlabel('Epoch')
     plt.ylabel('Gradient of W[0][0]')
@@ -406,47 +461,27 @@ def _(hist2_list, np, plt):
 
 
 @app.cell
-def _(hist_list, np, plt):
-    def get_ema(points, factor):
-        newpts = []
-        for point in points:
-            if len(newpts) == 0:
-                newpts.append(point)
-            else:
-                newpts.append(newpts[-1] * factor + point * (1 - factor))
-        return newpts
+def _(loss_history, np, plt, runtime):
+    #plt.figure(figsize=(10,6))
 
-    def get_avg(points, epoch=10):
-        return np.mean(np.array(points).reshape(epoch, -1), axis=1)
-    
-    """
-    x2_adahessian = np.linspace(0, 10, len(hist_list[0]))
-    x2_adam = np.linspace(0, 10, len(hist_list[1]))
-    x2_red = np.linspace(0, 10, len(hist_list[2]))
-    x2_sgd = np.linspace(0, 10, len(hist_list[3]))
+    plt.plot(range(1, 21), loss_history['sgd'], marker='o',markersize=3, label=f'SGD ({round(runtime['sgd'][-1])}s)')
+    plt.plot(range(1, 21), loss_history['red'], marker='o',markersize=3, label=f'RED ({round(runtime['red'][-1])}s)')
+    plt.plot(range(1, 21), loss_history['redm'], marker='o',markersize=3, label=f'RED-M ({round(runtime['redm'][-1])}s)')
+    plt.plot(range(1, 21), loss_history['adahessian'], marker='o', markersize=3, label=f'AdaHessian ({round(runtime['adahessian'][-1])}s)')
+    plt.plot(range(1, 21), loss_history['adam'], marker='o', markersize=3, label=f'Adam ({round(runtime['adam'][-1])}s)')
 
-    plt.plot(x2_adahessian, get_ema(hist_list[0], 0.9), color='y', alpha=0.5, label='AdaHessian')
-    plt.plot(x2_adam, get_ema(hist_list[1], 0.9), color='g', alpha=0.5, label='Adam')
-    plt.plot(x2_red, get_ema(hist_list[2], 0.9), color='r', alpha=0.5, label='RED')
-    plt.plot(x2_sgd, get_ema(hist_list[3], 0.9), color='b', alpha=0.5, label='SGD')
-    """
-
-    plt.plot(range(1, 11), get_avg(hist_list[0]), marker='o', color='y', label='AdaHessian')
-    plt.plot(range(1, 11), get_avg(hist_list[1]), marker='o', color='g', label='Adam')
-    plt.plot(range(1, 11), get_avg(hist_list[2]), marker='o', color='r', label='RED')
-    plt.plot(range(1, 11), get_avg(hist_list[3]), marker='o', color='b', label='SGD')
-
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Training Loss')
+    plt.title("Training Loss Across 20 Epochs")
+    plt.xticks(np.arange(0, 21, 2))
     plt.legend()
-    plt.grid(True)
     plt.show()
     return
 
 
 @app.cell
-def _(N_list, dict, np, vocab):
-    embed = N_list[3].list_layers[0].A.T
+def _(dict, networks, np, vocab):
+    embed = networks['redm'][-1].list_layers[0].A.T
     norms = np.linalg.norm(embed, axis=1, keepdims=True)
     norm_embed = embed / norms
 
@@ -514,4 +549,257 @@ def _(dict, norm_embed, np, vocab):
     find_analogy("small", "smaller", "big", top_k=3) # bigger
     find_analogy("writing", "wrote", "making", top_k=3) # made
     find_analogy("america", "american", "canada", top_k=3) # canadian
+    return
+
+
+@app.cell
+def _(dict, networks, np, optimizers, vocab, vocab_st):
+    def run_simlex_benchmark(filepath, norm_embed):
+        simlex, model = [], []
+
+        with open(filepath, 'r') as f:
+            next(f)
+            for line in f:
+                parts = line.strip().lower().split('\t')
+
+                if len(parts) >= 4 and parts[0] in vocab_st and parts[1] in vocab_st:
+                    simlex.append(float(parts[3]))
+                    cos_sim = np.dot(norm_embed[dict[parts[0]]], norm_embed[dict[parts[1]]])
+                    model.append(cos_sim)
+
+        # spearman rank correlation
+        n = len(simlex)
+        d_sq = (np.argsort(np.argsort(simlex)) - np.argsort(np.argsort(model))) ** 2
+        res = 1 - (6 * np.sum(d_sq)) / (n * (n ** 2 - 1))
+        print("Simlex999 benchmark:")
+        print(f"Data size: {n}")
+        print(f"Spearman's Rho: {res:.4f}\n")
+
+    def run_wordsim_benchmark(filepath, norm_embed):
+        wordsim, model = [], []
+
+        with open(filepath, 'r') as f:
+            next(f)
+            for line in f:
+                parts = line.strip().lower().split(',')
+
+                if len(parts) >= 3 and parts[0] in vocab_st and parts[1] in vocab_st:
+                    wordsim.append(float(parts[2]))
+                    cos_sim = np.dot(norm_embed[dict[parts[0]]], norm_embed[dict[parts[1]]])
+                    model.append(cos_sim)
+
+        # spearman rank correlation
+        n = len(wordsim)
+        d_sq = (np.argsort(np.argsort(wordsim)) - np.argsort(np.argsort(model))) ** 2
+        res = 1 - (6 * np.sum(d_sq)) / (n * (n ** 2 - 1))
+
+        print("WordSim353 benchmark:")
+        print(f"Data size: {n}")
+        print(f"Spearman's Rho: {res:.4f}\n")
+
+    def run_google_benchmark(path, norm_embed, k=5):
+        tests = []
+        valid = 0
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip().lower()
+                words = line.split()
+                if len(words) == 4 and all(w in vocab_st for w in words):
+                    tests.append(tuple(words))
+                    valid += 1
+
+        top1 = 0
+        topk = 0
+        for (a, b, c, ans) in tests:
+            vec_a = norm_embed[dict[a]]
+            vec_b = norm_embed[dict[b]]
+            vec_c = norm_embed[dict[c]]
+
+            target = vec_b - vec_a + vec_c
+            target = target / np.linalg.norm(target)
+            similar = norm_embed @ target
+            similar[dict[a]] = -100
+            similar[dict[b]] = -100
+            similar[dict[c]] = -100
+            nearest = np.argsort(similar)[::-1]
+
+            best_words = [vocab[idx] for idx in nearest[:k]]
+
+            if best_words[0] == ans:
+                top1 += 1
+            if ans in best_words:
+                topk += 1
+
+        acc1 = (top1 / valid) * 100
+        acck = (topk / valid) * 100
+
+        print("Google benchmark:")
+        print(f"Top-1 Accuracy: {top1}/{valid} ({acc1:.2f}%)")
+        print(f"Top-{k} Accuracy: {topk}/{valid} ({acck:.2f}%)\n")
+
+    for optim3 in optimizers:
+        embed2 = networks[optim3][4].list_layers[0].A.T
+        norms2 = np.linalg.norm(embed2, axis=1, keepdims=True)
+        norm_embed2 = embed2 / norms2
+        print(f"===== {optim3} =====")
+        run_simlex_benchmark("SimLex-999.txt", norm_embed2)
+        run_wordsim_benchmark("wordsim353crowd.csv", norm_embed2)
+        run_google_benchmark("questions-words.txt", norm_embed2, k=3)
+        run_google_benchmark("questions-words.txt", norm_embed2, k=5)
+    return run_google_benchmark, run_simlex_benchmark, run_wordsim_benchmark
+
+
+@app.cell
+def _():
+    # model_save = N
+    import marimo as mo
+
+    return (mo,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Backup arrays & testing with backups
+    """)
+    return
+
+
+@app.cell
+def _():
+    import json
+    import pickle
+
+    return json, pickle
+
+
+@app.cell
+def _(
+    dict,
+    grad_history,
+    json,
+    loss_history,
+    networks,
+    np,
+    optimizers,
+    pickle,
+    runtime,
+    vocab,
+):
+    # backup
+    with open("vocab_5.json", "w") as f:
+        json.dump({'vocab': vocab, 'dict': dict}, f)
+
+    with open("plot_data_5.pkl", "wb") as f:
+        pickle.dump({
+            'loss_history': loss_history,
+            'grad_history': grad_history,
+            'runtime': runtime
+        }, f)
+
+    all_embed = {}
+    for optim4 in optimizers:
+        embed3 = networks[optim4][-1].list_layers[0].A.T
+        norms3 = np.linalg.norm(embed3, axis=1, keepdims=True)
+        all_embed[optim4] = embed3 / norms3
+
+    np.savez("all_word_vectors_5.npz", **all_embed)
+    return
+
+
+@app.cell
+def _(
+    np,
+    optimizers,
+    run_google_benchmark,
+    run_simlex_benchmark,
+    run_wordsim_benchmark,
+):
+    loaded = np.load("all_word_vectors_2.npz")
+    for optim5 in optimizers:
+        norm_embed3 = loaded[optim5]
+        print(f"===== {optim5} =====")
+        run_simlex_benchmark("SimLex-999.txt", norm_embed3)
+        run_wordsim_benchmark("wordsim353crowd.csv", norm_embed3)
+        run_google_benchmark("questions-words.txt", norm_embed3, k=3)
+        run_google_benchmark("questions-words.txt", norm_embed3, k=5)
+    return
+
+
+@app.cell
+def _(display, pickle, plt):
+    def loss_over_time():
+        with open("plot_data_5.pkl", "rb") as f:
+            data = pickle.load(f)
+        
+        loss_history = data['loss_history']
+        runtime = data['runtime']
+
+        for optim, losses in loss_history.items():
+            time_data = runtime[optim]
+            times = [time_data[i] for i in range(len(losses))]
+            plt.plot(times, losses, label=display[optim], marker='o', markersize=3)
+
+        plt.xlabel("Cumulative Time (seconds)")
+        plt.ylabel("Training Loss")
+        plt.title("Training Loss Over Time")
+        plt.legend()
+        plt.show()
+
+    loss_over_time()
+    return
+
+
+@app.cell
+def _(
+    Neur,
+    X_test,
+    Y_test,
+    display,
+    get_cbow,
+    get_one_hot,
+    networks,
+    optimizers,
+    pickle,
+    plt,
+):
+    def test_loss_over_time():
+        with open("plot_data_5.pkl", "rb") as f:
+            data = pickle.load(f)
+        runtime = data['runtime']
+
+        test_losses = {optim: [] for optim in optimizers}
+        batch_size = 256
+
+        for optim in optimizers:
+            for N in networks[optim]:
+                loss_layer = Neur.Ilogit_and_KL(None)
+                N_a = Neur.Network([N, loss_layer])
+                total_loss = 0
+                batches = 0
+            
+                for k in range(0, len(X_test), batch_size):
+                    X_cur = get_cbow(X_test[k : k + batch_size])
+                    Y_cur = get_one_hot(Y_test[k : k + batch_size])
+
+                    loss_layer.save_D = Y_cur.T
+                    loss = N_a.forward(X_cur.T)
+
+                    total_loss += loss
+                    batches += 1
+
+                test_losses[optim].append(total_loss / batches)
+
+        for optim, losses in test_losses.items():
+            time_data = runtime[optim]
+            times = [time_data[i] for i in range(len(losses))]
+            plt.plot(times, losses, label=display[optim], marker="o", markersize=3)
+
+        plt.xlabel("Cumulative Time (seconds)")
+        plt.ylabel("Test Loss")
+        plt.title("Test Loss Over Time")
+        plt.legend()
+        plt.show()
+
+    test_loss_over_time()
     return
