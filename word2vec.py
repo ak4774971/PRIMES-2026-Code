@@ -377,7 +377,6 @@ def _(Neur, X_test, Y_test, get_cbow, get_one_hot, networks, optimizers):
         total_loss = 0
         batches = 0
 
-        # 3. Blitz through the unseen X_test and Y_test arrays
         for k in range(0, len(X_test), batch):
             X_cur = get_cbow(X_test[k:k+batch])
             Y_cur = get_one_hot(Y_test[k:k+batch])
