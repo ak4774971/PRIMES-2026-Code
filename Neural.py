@@ -58,7 +58,8 @@ class Dense(Generic):
         self.n_entree = nb_entree
         self.n_sortie = nb_output
         self.nb_params = self.n_entree * self.n_sortie + self.n_sortie
-        self.A = np.random.randn(self.n_sortie, self.n_entree)
+        scale = np.sqrt(2.0 / nb_entree)
+        self.A = np.random.randn(self.n_sortie, self.n_entree) * scale
         self.b = np.random.randn(self.n_sortie)
 
     def set_params(self, params):
@@ -182,10 +183,13 @@ class Ilogit_and_KL(Generic):
 
     def forward(self, X):
         self.save_X = np.copy(X)
-        log_sum_exp = np.log(np.sum(np.exp(self.save_X), axis=0))
-        return np.sum(log_sum_exp - np.sum(self.save_X * self.save_D, axis=0))
+        x_max = np.max(self.save_X, axis=0)
+        log_sum_exp = x_max + np.log(np.sum(np.exp(self.save_X - x_max), axis=0))
+        return np.mean(log_sum_exp - np.sum(self.save_X * self.save_D, axis=0))
 
     def backward(self, grad_sortie):
         grad_local = None
-        ytilde = np.exp(self.save_X) / np.sum(np.exp(self.save_X), axis=0)
-        return grad_local, ytilde - self.save_D
+        x_max = np.max(self.save_X, axis=0)
+        ytilde = np.exp(self.save_X - x_max) / np.sum(np.exp(self.save_X - x_max), axis=0)
+        batch = self.save_X.shape[1]
+        return grad_local, (ytilde - self.save_D) / batch
