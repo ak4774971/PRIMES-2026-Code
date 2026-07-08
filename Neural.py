@@ -3,28 +3,20 @@ import numpy as np
 
 class Generic:
     def __init__(self):
-        self.nb_params = None  # Number of parameters in the layer
-        self.save_X = None  # Saved layer input (set in forward)
+        self.nb_params = None
+        self.save_X = None 
 
     def set_params(self, params):
-        # Set the layer parameters; input is a vector of length self.nb_params
         pass
 
     def get_params(self):
-        # Returns a vector of length self.nb_params containing the layer parameters
         return None
 
     def forward(self, X):
-        # Forward pass; X is the input data
         self.save_X = np.copy(X)
         return None
 
     def backward(self, grad_sortie):
-        # Backpropagation through the layer.
-        # grad_sortie is the gradient w.r.t. the layer output.
-        # Returns:
-        # grad_local: vector of length self.nb_params, gradient w.r.t. local parameters
-        # grad_entree: gradient w.r.t. layer input
         grad_local = None
         grad_entree = None
         return grad_local, grad_entree
