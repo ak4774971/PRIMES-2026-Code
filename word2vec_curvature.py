@@ -347,7 +347,6 @@ def _(np, plt, step_size):
     x_axis = np.linspace(0, 5, len(step_size['sgd']))
 
     plt.plot(x_axis, step_size['redm'], alpha=0.5, lw=0.5, label='RED-M')
-    #plt.plot(x_axis, step_size['adam'], alpha=0.5, lw=0.5, label='Adam')
     plt.plot(x_axis, step_size['red'], alpha=0.5, lw=0.5, label='RED')
     plt.plot(x_axis, step_size['sgd'], alpha=0.5, label='SGD')
 
