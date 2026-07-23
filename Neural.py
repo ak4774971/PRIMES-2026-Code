@@ -1,4 +1,7 @@
-import numpy as np
+try:
+    import cupy as np  # GPU (NumPy-compatible)
+except ImportError:
+    import numpy as np  # CPU fallback
 
 
 class Generic:
