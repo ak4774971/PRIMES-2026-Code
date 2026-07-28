@@ -18,3 +18,17 @@ To run `word2vec.py` successfully, the following files need to be downloaded in 
 * `questions-words.txt`
     * The Google Analogy Test Set which measures how well the embeddings comprehend the general relationships between words
     * You can find the dataset through this [link](http://download.tensorflow.org/data/questions-words.txt).
+
+### Quick setup with `download_files.py`
+1. Install the required package:
+   ```bash
+   pip install kaggle
+   ```
+2. Create a Kaggle API token from [Kaggle Account Settings](https://www.kaggle.com/settings) (`Create New API Token`), then export it in your shell:
+   ```bash
+   export KAGGLE_API_TOKEN="<your_kaggle_token>"
+   ```
+3. From the project root, download all datasets:
+   ```bash
+   python download_files.py
+   ```
