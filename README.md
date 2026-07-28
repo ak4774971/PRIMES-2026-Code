@@ -3,6 +3,22 @@ MIT PRIMES 2026 code for experimentation.
 
 The main training and evaluation script is `word2vec.py`, while `word2vec_curvature.py` contains the source code of some of the experiments we ran for Section 3.
 
+## Python packages
+Install the base dependencies with:
+```bash
+pip install -r requirements.txt
+```
+
+### GPU acceleration (CuPy)
+`Neural.py` / `word2vect_experiments.py` use CuPy when available (otherwise they fall back to NumPy on CPU). Install a CuPy build that matches your CUDA version, for example:
+```bash
+nvidia-smi   # check the CUDA Version reported in the header
+pip install cupy-cuda12x          # CUDA 12.x
+# or
+pip install "cupy-cuda13x[ctk]"   # CUDA 13.x (includes CUDA Toolkit wheels)
+```
+See the [CuPy install guide](https://docs.cupy.dev/en/stable/install.html) for other CUDA versions.
+
 ## Required Files and Datasets
 To run `word2vec.py` successfully, the following files need to be downloaded in the same directory as the `word2vec.py` script:
 
