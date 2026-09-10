@@ -1,0 +1,12 @@
+# Core (CPU)
+numpy
+matplotlib
+tqdm
+psutil
+kaggle
+marimo
+
+# GPU acceleration (CuPy) is CUDA-version specific — install separately, e.g.:
+#   pip install cupy-cuda12x
+#   pip install "cupy-cuda13x[ctk]"
+# See README.md ("GPU acceleration").
