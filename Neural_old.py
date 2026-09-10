@@ -1,4 +1,7 @@
-import cupy as np
+try:
+    import cupy as np  # GPU (NumPy-compatible)
+except ImportError:
+    import numpy as np  # CPU fallback
 
 
 class Generic:
@@ -51,8 +54,8 @@ class Dense(Generic):
         self.n_sortie = nb_output
         self.nb_params = self.n_entree * self.n_sortie + self.n_sortie
         scale = np.sqrt(2.0 / nb_entree)
-        self.A = (np.random.randn(self.n_sortie, self.n_entree) * scale).astype(np.float32)
-        self.b = np.random.randn(self.n_sortie).astype(np.float32)
+        self.A = np.random.randn(self.n_sortie, self.n_entree) * scale
+        self.b = np.random.randn(self.n_sortie)
 
     def set_params(self, params):
         self.A = params[: self.n_entree * self.n_sortie].reshape(
