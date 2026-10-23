@@ -1,7 +1,7 @@
 # MIT PRIMES 2026
 MIT PRIMES 2026 code for experimentation.
 
-The main training and evaluation script is `word2vec.py`, while `word2vec_curvature.py` contains the source code of some of the experiments we ran for Section 3.
+The main training and evaluation script is `word2vect_single.ipynb`, while `word2vect_sweep.ipynb` contains the source code of an experiment sweeping over different hyperparameters.
 
 ## Python packages
 Install the base dependencies with:
